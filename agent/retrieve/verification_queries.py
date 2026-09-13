@@ -1,0 +1,397 @@
+"""V3 选项验证查询：同时搜索支持陈述和不带候选值的真实谓词。"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from agent.retrieve.claims import ClaimTarget
+from agent.retrieve.structured_queries import extract_query_entities
+from agent.schemas import Question
+
+
+RELATION_TERMS = (
+    "发行主体",
+    "发行人",
+    "发行规模",
+    "发行金额",
+    "发行限额",
+    "注册金额",
+    "募集资金",
+    "募集资金用途",
+    "受托管理人",
+    "主承销商",
+    "信用评级",
+    "票面利率",
+    "转股价格",
+    "初始转股价",
+    "转股价格向下修正",
+    "回售",
+    "有条件赎回条款",
+    "有条件赎回",
+    "赎回",
+    "违约责任",
+    "违约条款",
+    "违约或补偿",
+    "违约情形",
+    "违约赔偿",
+    "违约利息",
+    "违约金",
+    "罚息利率",
+    "计算公式",
+    "计算基数",
+    "资产减值补偿",
+    "补偿条款",
+    "减值测试报告",
+    "通知期限",
+    "书面通知",
+    "兑付日",
+    "股票代码",
+    "证券简称",
+    "发行日期",
+    "公告日期",
+    "上市地点",
+    "发行股份购买资产",
+    "信息披露义务",
+    "债券持有人",
+    "保险责任",
+    "保险金",
+    "身故保险金",
+    "等待期",
+    "犹豫期",
+    "现金价值",
+    "现金价值计算",
+    "退保费用比例",
+    "比例公式",
+    "退保",
+    "免责",
+    "责任免除",
+    "酒后驾驶",
+    "失能失智护理",
+    "预防接种单位违反",
+    "接种条件",
+    "异常反应",
+    "食品保质期",
+    "超过规定的保质期限",
+    "食物中毒",
+    "赔付",
+    "双耳失聪",
+    "重大疾病",
+    "艾滋病病毒",
+    "器官移植",
+    "保单贷款",
+    "宽限期",
+    "效力中止",
+    "施救费用",
+    "免赔额",
+    "特定药品费用",
+    "养老年金开始领取日",
+    "开始领取日",
+    "故意自伤",
+    "自杀",
+    "解除合同",
+    "退还保险费",
+    "家庭共享",
+    "伤残保险金",
+    "应当",
+    "不得",
+    "可以",
+    "处罚",
+    "罚款",
+    "期限",
+    "营业收入",
+    "营业总收入",
+    "增长率",
+    "营收",
+    "归母净利润",
+    "归属于上市公司股东的净利润",
+    "净利润",
+    "经营活动现金流量净额",
+    "经营活动现金流净额",
+    "经营活动现金流",
+    "经营现金流",
+    "现金流量净额",
+    "研发投入",
+    "研发投入强度",
+    "研发投入占比",
+    "研发投入占营业收入的比例",
+    "研发费用占比",
+    "资产负债率",
+    "每股现金分红",
+    "现金分红总额",
+    "股份回购",
+    "现金分红与股份回购",
+    "分红",
+    "股息",
+    "同比",
+    "发布日期",
+    "施行日期",
+    "生效日期",
+    "成立时间",
+    "受益所有人",
+    "客户尽职调查",
+    "交易记录保存",
+    "最低保存期限",
+    "反洗钱调查",
+    "调查结束",
+    "解除保险合同",
+    "核实申请人身份",
+    "金额门槛",
+    "报告时限",
+    "大额交易报告",
+    "可疑交易报告",
+    "内部审批",
+    "分类评价",
+    "市场禁入",
+    "行政处罚",
+    "定期报告",
+    "半年度报告",
+    "信息披露",
+    "股东会职权",
+    "股东大会职权",
+    "股东大会",
+    "股东会",
+    "董事会",
+    "董事候选人",
+    "担保",
+    "书面形式",
+    "表决",
+    "批准",
+    "审议批准",
+    "新成立基金份额",
+    "主动型新发",
+    "保费贡献率",
+    "保费贡献",
+    "复合增速",
+    "市场规模",
+    "数据中心半导体加速市场",
+    "市场份额",
+    "市占率",
+    "装机量",
+    "渗透率",
+    "销量",
+    "收入增速",
+    "可支配收入",
+    "居民收入",
+    "客户资金杠杆",
+    "杠杆",
+    "资产净利率",
+    "内置检测规则",
+    "对象标准",
+    "解析规则",
+    "油价",
+    "化工品价格",
+    "美伊谈判",
+)
+REFERENCE_TERMS = {
+    "第一份文档",
+    "第二份文档",
+    "该文档",
+    "两份文档",
+    "下列说法",
+    "正确选项",
+    "错误选项",
+}
+RATING_RE = re.compile(r"(?<![A-Za-z])(?:AAA|AA\+?|A\+?|BBB\+?)(?![A-Za-z])", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class VerificationQueryBundle:
+    query: str
+    intent: str
+    weight: float
+
+
+def build_verification_query_bundles(
+    question: Question,
+    claim: ClaimTarget,
+    *,
+    max_bundles: int = 6,
+) -> list[VerificationQueryBundle]:
+    """构造支持查询、真实值查询和条件例外查询。"""
+    predicates = extract_predicate_terms(question, claim)
+    candidate_values = extract_candidate_values(claim)
+    option_entities = _clean_terms(extract_query_entities(claim.option_text))
+    bundles = [
+        VerificationQueryBundle(_join(*predicates, *candidate_values), "support", 1.0),
+        # 不携带选项声称的数字/日期，避免错误选项把检索带向不存在的值。
+        VerificationQueryBundle(_join(*predicates), "predicate_truth", 2.4),
+    ]
+    if option_entities:
+        bundles.append(VerificationQueryBundle(_join(*predicates, *option_entities[:6]), "entity_support", 0.9))
+    if claim.claim_type in {"clause_consequence", "date_fact"}:
+        bundles.append(
+            VerificationQueryBundle(
+                _join(*predicates, "但", "除外", "仅限", "不得", "应当", "期限"),
+                "exception_scope",
+                1.2,
+            )
+        )
+    if claim.claim_type in {"metric_fact", "comparison"}:
+        bundles.append(
+            VerificationQueryBundle(
+                _join(*predicates, "单位", "本期", "上期", "同比", "合计"),
+                "metric_ground_truth",
+                1.4,
+            )
+        )
+    return _dedupe_bundles(bundles)[:max_bundles]
+
+
+def extract_predicate_terms(question: Question, claim: ClaimTarget) -> list[str]:
+    """提取需要在原文中核验的关系，不把候选答案值当成谓词。"""
+    # 题干常同时罗列多个主题；先按当前选项取谓词，避免“分红”污染净利润/现金流选项。
+    terms = _matched_relation_terms(claim.option_text)
+    if not terms:
+        terms = _matched_relation_terms(question.question)
+    if not terms:
+        terms.extend(
+            term
+            for term in _clean_terms(extract_query_entities(claim.option_text))
+            if term not in extract_candidate_values(claim) and not _looks_like_candidate_literal(term)
+        )
+    return _expand_relation_aliases(list(dict.fromkeys(terms)))[:16]
+
+
+def extract_candidate_values(claim: ClaimTarget) -> list[str]:
+    """候选值仅用于支持证据打分，不作为真实值查询的必要条件。"""
+    values = [value for value in claim.numbers if not _is_plain_year(value)]
+    values.extend(value for value in claim.dates if not _is_plain_year(value))
+    values.extend(match.group(0).upper() for match in RATING_RE.finditer(claim.option_text))
+    return list(dict.fromkeys(value.strip() for value in values if value.strip()))[:8]
+
+
+def _clean_terms(terms: list[str]) -> list[str]:
+    output: list[str] = []
+    for term in terms:
+        term = " ".join(str(term).split())
+        if not term or term in REFERENCE_TERMS or len(term) > 36:
+            continue
+        if any(reference in term for reference in REFERENCE_TERMS):
+            continue
+        output.append(term)
+    return list(dict.fromkeys(output))
+
+
+def _looks_like_candidate_literal(value: str) -> bool:
+    return bool(re.fullmatch(r"[-+()（）\d\s,，.]+(?:%|％|元|万元|亿元|万|亿|年|月|日)?", value))
+
+
+def _is_plain_year(value: str) -> bool:
+    return bool(re.fullmatch(r"(?:19|20)\d{2}年?", re.sub(r"\s+", "", str(value or ""))))
+
+
+def _matched_relation_terms(text: str) -> list[str]:
+    """优先保留最长指标名，避免“归母净利润/净利润”重复计分。"""
+    output: list[str] = []
+    for term in sorted(RELATION_TERMS, key=len, reverse=True):
+        if term not in text or any(term in existing for existing in output):
+            continue
+        output.append(term)
+    return output
+
+
+def _expand_relation_aliases(terms: list[str]) -> list[str]:
+    """补充同一披露字段的常见写法，仍保持纯规则、无 embedding。"""
+    joined = " ".join(terms)
+    aliases: list[str] = []
+    any_rules = (
+        (
+            ("发行金额", "发行限额", "注册金额"),
+            ("发行规模", "发行总额", "发行上限", "注册金额", "不超过"),
+        ),
+        (("初始转股价",), ("初始转股价格", "转股价格", "每股")),
+        (("股票代码",), ("股票代码", "证券代码")),
+        (("证券简称",), ("证券简称", "股票简称")),
+        (("发行日期", "公告日期"), ("发行日期", "发行公告日期", "公告日期")),
+        (("资产减值补偿", "减值测试报告"), ("减值测试报告", "资产减值补偿", "减值补偿", "出具之日起", "书面方式通知")),
+        (("通知期限", "书面通知"), ("书面通知", "日内通知", "出具之日起", "收到通知后")),
+        (("兑付日",), ("兑付日期", "到期兑付日", "债券期限")),
+        (("违约利息", "计算基数"), ("支付违约金", "延迟支付的本金和利息", "计算方式")),
+        (("违约条款", "违约或补偿"), ("违约情形", "违约责任", "补偿", "赔偿")),
+        (("补偿条款",), ("补偿", "赔偿")),
+        (("发行股份购买资产",), ("发行股份及支付现金购买资产", "募集配套资金")),
+        (("营业收入", "营业总收入", "营收"), ("营业收入", "营业总收入", "营业额", "营收", "本年比上年增减")),
+        (("研发投入强度", "研发投入占比", "研发投入占营业收入比例", "研发投入占营业收入的比例"), ("研发投入占营业收入比例", "研发费用占营业收入比例")),
+        (
+            ("归母净利润", "归属于上市公司股东的净利润", "归属于母公司股东的净利润"),
+            ("归属于上市公司股东的净利润", "归属于母公司的净利润", "母公司拥有人应占溢利"),
+        ),
+        (("经营活动现金流净额", "经营活动现金流", "经营活动现金流量净额"), ("经营活动产生的现金流量净额", "经营活动现金流量净额")),
+        (("每股现金分红", "现金分红总额"), ("每10股派息", "每股股息", "末期股息", "利润分配方案")),
+        (("股份回购", "现金分红与股份回购"), ("股份回购", "回购总金额", "现金分红", "归母净利润")),
+        (("股东大会",), ("股东会",)),
+        (("新成立基金份额", "主动型新发"), ("新成立份额", "新成立基金", "主动型新发")),
+        (("保费贡献率",), ("保费贡献", "银保渠道占比", "银保渠道保费")),
+        (("保费贡献",), ("保费贡献率", "银保渠道保费", "占比")),
+        (("数据中心半导体加速市场",), ("数据中心半导体", "加速市场", "市场规模")),
+        (("内置检测规则",), ("内置检测规则", "检测规则", "数字化底座")),
+        (("对象标准",), ("对象标准", "标准化对象")),
+        (("解析规则",), ("解析规则", "自动解析", "手动解析")),
+        (("油价", "化工品价格", "美伊谈判"), ("美伊谈判", "油价", "原油", "化工品价格")),
+        (("客户资金杠杆", "杠杆"), ("客户资金杠杆", "客户资金", "杠杆倍数")),
+        (("资产净利率",), ("自有资产净利率", "ROA")),
+        (("市场份额", "市占率"), ("市场份额", "市占率", "占比")),
+        (("身故保险金",), ("身故保险金", "身故给付", "被保险人身故")),
+        (("酒后驾驶", "失能失智护理"), ("酒后驾驶", "失能失智护理", "责任免除")),
+        (("预防接种单位违反", "接种条件", "异常反应"), ("预防接种单位", "违反", "接种方案", "异常反应", "不承担")),
+        (("食品保质期", "超过规定的保质期限", "食物中毒"), ("超过规定的保质期限", "保质期限", "食品安全事故", "责任免除")),
+        (("现金价值计算", "退保费用比例", "比例公式"), ("现金价值等于", "保单年度", "退保费用比例", "比例")),
+        (("双耳失聪",), ("双耳失聪", "听力永久不可逆性丧失", "重大疾病")),
+        (("艾滋病病毒", "器官移植"), ("感染艾滋病病毒", "患艾滋病", "经输血", "职业关系", "器官移植", "责任免除")),
+        (("保单贷款",), ("保单贷款", "贷款金额", "现金价值净额")),
+        (("效力中止", "宽限期"), ("合同效力中止", "效力中止", "宽限期间")),
+        (("施救费用",), ("施救费用", "防止或者减少损失", "必要的合理的费用")),
+        (("免赔额", "家庭共享"), ("免赔额", "年免赔额", "家庭共享免赔额")),
+        (("特定药品费用",), ("特定药品费用", "院外恶性肿瘤特定药品", "指定药店", "处方审核")),
+        (("开始领取日", "养老年金开始领取日"), ("养老保险金领取日", "养老年金开始领取日", "开始领取")),
+        (("故意自伤", "自杀"), ("故意自伤", "自杀", "二年", "2年")),
+        (("解除合同", "退还保险费"), ("解除本合同", "退还所交保险费", "犹豫期")),
+        (("转股价格向下修正",), ("向下修正转股价格", "转股价格修正", "修正权限")),
+        (("有条件赎回条款", "有条件赎回"), ("有条件赎回条款", "赎回条件", "未转股余额")),
+        (("回售", "赎回"), ("回售条款", "赎回条款", "有条件赎回")),
+        (("违约责任", "违约赔偿", "违约金"), ("违约情形", "支付违约金", "延迟支付", "惩罚系数", "计算公式")),
+        (("计算公式",), ("计算方式", "本金和利息", "票面利率", "违约天数")),
+        (("报告时限",), ("报告时限", "工作日内报告", "日内报告")),
+        (("交易记录保存",), ("客户身份资料", "交易记录", "保存期限")),
+        (
+            ("最低保存期限", "调查结束", "反洗钱调查"),
+            (
+                "反洗钱调查",
+                "最低保存期限届满",
+                "仍未结束",
+                "保存至反洗钱调查工作结束",
+                "客户身份资料及交易记录",
+            ),
+        ),
+        (
+            ("解除保险合同", "核实申请人身份", "金额门槛"),
+            (
+                "申请解除保险合同",
+                "退还的保险费",
+                "人民币1万元以上",
+                "核实申请人身份",
+            ),
+        ),
+    )
+    for triggers, values in any_rules:
+        if any(trigger in joined for trigger in triggers):
+            aliases.extend(values)
+    if "董事会" in joined and "批准" in joined:
+        aliases.extend(("董事会的报告", "董事会工作报告"))
+    return list(dict.fromkeys([*terms, *aliases]))
+
+
+def _join(*parts: str) -> str:
+    return " ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _dedupe_bundles(bundles: list[VerificationQueryBundle]) -> list[VerificationQueryBundle]:
+    output: list[VerificationQueryBundle] = []
+    seen: set[str] = set()
+    for bundle in bundles:
+        query = " ".join(bundle.query.split())
+        if query and query not in seen:
+            output.append(VerificationQueryBundle(query, bundle.intent, bundle.weight))
+            seen.add(query)
+    return output

@@ -1,0 +1,4 @@
+# Keep the exact byte stream whose SHA-256 is audited before leaderboard upload.
+submissions/v38_final_conditional97_answer.csv -text -diff
+submissions/b1_first_best_v4_compact_verified_answer.csv -text -diff
+submissions/b1_first_best_v8_reasoning_compliant_answer.csv -text -diff

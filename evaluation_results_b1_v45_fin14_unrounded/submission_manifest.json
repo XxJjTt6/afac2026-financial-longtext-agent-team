@@ -1,0 +1,43 @@
+{
+  "version": "b1_fin14_unrounded_v45",
+  "created_at": "2026-07-25T16:42:43.824078+08:00",
+  "question_count": 100,
+  "answer_change_vs_v42": {
+    "fin_b_014": {
+      "before": [
+        "1.12",
+        "9.82",
+        "8.70"
+      ],
+      "after": [
+        "1.12",
+        "9.82",
+        "8.69"
+      ]
+    }
+  },
+  "intermediate_rounding_forbidden": true,
+  "row_level_source_binding": true,
+  "token_usage": {
+    "prompt_tokens": 460129,
+    "completion_tokens": 38687,
+    "total_tokens": 498816
+  },
+  "token_headroom_below_500k": 1183,
+  "validation": {
+    "question_count": 100,
+    "token_usage": {
+      "prompt_tokens": 460129,
+      "completion_tokens": 38687,
+      "total_tokens": 498816
+    },
+    "reasoning_min_chars": 150,
+    "reasoning_max_chars": 519
+  },
+  "sha256": {
+    "v42_results": "0638a4180b0e9390a3226a7d161117645162e1fec2c15baf0d44f8ef8a564e94",
+    "fin14_correction": "ce9fbd10dbcfffa431035f1bac5f06cf550125082341c05c2cc1427cfba8b681",
+    "answer_results": "ccd1f963b12540d8e3b2f3b1c626b953222a99fdaf452c2a62ef8aa28ace7c46",
+    "submission": "f3ccf455edc97345d38716fff4d2a06085d7baed942fccf3433260f8ba73a24f"
+  }
+}
